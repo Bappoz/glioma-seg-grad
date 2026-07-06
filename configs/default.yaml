@@ -1,0 +1,29 @@
+# Config de referencia (carregue com yaml.safe_load e passe p/ TrainConfig)
+root: "/content/BraTS2021"      # ajuste no Colab
+img_size: 256
+batch_size: 8
+slices_per_case: 32
+
+backbone: "stub"                 # troque para "sam2" quando tiver o checkpoint
+sam2_cfg: "sam2_hiera_s.yaml"
+sam2_ckpt: "checkpoints/sam2_hiera_small.pt"
+freeze_encoder: true
+n_seg_classes: 4                 # fundo, NCR/NET, ED, ET
+n_grades: 2                      # LGG vs HGG
+feat_ch: 256
+
+epochs: 30
+lr: 0.0003
+weight_decay: 0.0001
+w_seg: 1.0
+w_grade: 0.5
+use_focal: false
+amp: true
+out_dir: "runs/exp1"
+seg_ce_weight: [0.1, 1.0, 1.0, 1.0]   # deprioriza o fundo
+
+# --- LoRA (adaptacao do encoder de fundacao) ---
+use_lora: false        # true p/ adaptar SAM2/MedSAM com baixo rank
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
