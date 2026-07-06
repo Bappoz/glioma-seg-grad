@@ -1,0 +1,11 @@
+torch>=2.1
+torchvision
+numpy
+nibabel          # leitura de MRI .nii.gz (BraTS)
+pyyaml
+matplotlib
+scikit-learn     # AUC / metricas de graduacao
+scipy            # Hausdorff95 (distance transform)
+tqdm
+# SAM 2 (instale do repo oficial quando for usar backbone="sam2"):
+# pip install "git+https://github.com/facebookresearch/segment-anything-2.git"

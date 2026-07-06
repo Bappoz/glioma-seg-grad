@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+runs/
+checkpoints/*.pt
+*.nii
+*.nii.gz
+data/
+.ipynb_checkpoints/
