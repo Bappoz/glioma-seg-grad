@@ -4,11 +4,18 @@ viz.py
 Visualizações para a seção de RESULTADOS do relatório.
 
 Funções (todas devolvem uma Figure do matplotlib, prontas para salvar):
-    - overlay_mask       : sobrepõe a máscara colorida (necrose/edema/ET) na MRI
-    - qualitative_panel  : painel lado-a-lado MRI | GT | Predição | Erro
+    - overlay_mask         : sobrepõe a máscara colorida (necrose/edema/ET) na MRI
+    - overlay_heatmap      : sobrepõe um mapa de calor (atenção/incerteza) na MRI
+    - qualitative_panel    : painel lado-a-lado MRI | GT | Predição | Erro
     - plot_training_curves : loss + Dice(WT/TC/ET) + graduação por época
-    - plot_roc           : curva ROC da graduação (com AUC)
-    - plot_hd95_bars     : barras de HD95 por sub-região
+    - plot_roc             : curva ROC da graduação (com AUC)
+    - plot_hd95_bars       : barras de HD95 por sub-região
+    - plot_reliability     : reliability diagram + ECE (calibração da graduação)
+    - plot_uncertainty_panel : MRI | predição | incerteza total | epistêmica (MC-Dropout)
+    - plot_explanation_panel : MRI | atenção da graduação | saliência por oclusão
+    - plot_biomarker_associations : AUC univariada de cada biomarcador vs grau
+    - plot_biomarker_by_grade     : distribuição de um biomarcador por grau
+    - plot_ablation        : comparação de variantes (Dice/AUC/params)
 
 Convenção de rótulos (contígua): 0=fundo, 1=NCR/NET, 2=ED, 3=ET.
 """
@@ -167,6 +174,159 @@ def plot_hd95_bars(hd95: Dict[str, float], save_path: Optional[str] = None):
             ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}",
                     ha="center", va="bottom", fontsize=10)
     ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=140, bbox_inches="tight")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Mapas de calor (atenção / incerteza / saliência)
+# ---------------------------------------------------------------------------
+def overlay_heatmap(ax, image2d, heat2d, title: str = "", cmap: str = "inferno",
+                    alpha: float = 0.5):
+    """Sobrepõe um mapa de calor [0,1] na fatia MRI (grayscale) em um eixo dado."""
+    img = _norm_img(_to_numpy(image2d))
+    h = _to_numpy(heat2d).astype(np.float32)
+    ax.imshow(img, cmap="gray")
+    im = ax.imshow(h, cmap=cmap, alpha=alpha)
+    ax.set_title(title, fontsize=11); ax.axis("off")
+    return im
+
+
+def plot_reliability(bins: Dict, ece: Optional[float] = None,
+                     save_path: Optional[str] = None):
+    """Reliability diagram: confiança média vs acurácia empírica por bin.
+    A diagonal = calibração perfeita. Mostra o ECE quando fornecido."""
+    conf = np.array(bins["conf"], dtype=float)
+    acc = np.array(bins["acc"], dtype=float)
+    cnt = np.array(bins["count"], dtype=float)
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    ax.plot([0, 1], [0, 1], "--", color="gray", lw=1, label="calibração perfeita")
+    m = ~np.isnan(conf)
+    ax.plot(conf[m], acc[m], "o-", color="#C44E52", lw=2, label="modelo")
+    for c, a, n in zip(conf[m], acc[m], cnt[m]):
+        ax.bar(c, a, width=0.03, color="#4C72B0", alpha=0.25)
+    ax.set_xlabel("Confiança média (bin)"); ax.set_ylabel("Acurácia empírica")
+    title = "Reliability diagram — Graduação"
+    if ece is not None:
+        title += f"   (ECE = {ece:.3f})"
+    ax.set_title(title); ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+    ax.legend(loc="upper left"); ax.grid(alpha=0.3)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=140, bbox_inches="tight")
+    return fig
+
+
+def plot_uncertainty_panel(image2d, seg_pred, total_entropy, mutual_info,
+                           save_path: Optional[str] = None):
+    """Painel 1x4: MRI | Predição | Incerteza total | Incerteza epistêmica.
+    A epistêmica (MC-Dropout) destaca ONDE o modelo hesita — normalmente as
+    bordas das sub-regiões e casos fora da distribuição."""
+    img = _norm_img(_to_numpy(image2d))
+    fig, ax = plt.subplots(1, 4, figsize=(18, 5))
+    ax[0].imshow(img, cmap="gray"); ax[0].set_title("MRI", fontsize=11); ax[0].axis("off")
+    overlay_mask(ax[1], img, _to_numpy(seg_pred).astype(int), "Segmentação predita")
+    im2 = overlay_heatmap(ax[2], img, total_entropy, "Incerteza total (entropia)", cmap="magma")
+    im3 = overlay_heatmap(ax[3], img, mutual_info, "Incerteza epistêmica (MI)", cmap="viridis")
+    fig.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
+    fig.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=140, bbox_inches="tight")
+    return fig
+
+
+def plot_explanation_panel(image2d, attention, occlusion,
+                           grade_pred: Optional[int] = None,
+                           grade_prob: Optional[float] = None,
+                           save_path: Optional[str] = None):
+    """Painel 1x3: MRI | Atenção da graduação | Saliência por oclusão.
+    Evidencia QUAL região sustentou a decisão de grau (explicabilidade)."""
+    img = _norm_img(_to_numpy(image2d))
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    sub = "MRI"
+    if grade_pred is not None:
+        g = {0: "LGG", 1: "HGG"}.get(int(grade_pred), str(grade_pred))
+        sub = f"MRI  (grau predito = {g}" + (f", p={grade_prob:.2f})" if grade_prob is not None else ")")
+    ax[0].imshow(img, cmap="gray"); ax[0].set_title(sub, fontsize=11); ax[0].axis("off")
+    im1 = overlay_heatmap(ax[1], img, attention, "Atenção intrínseca (pooling)", cmap="jet")
+    im2 = overlay_heatmap(ax[2], img, occlusion, "Saliência por oclusão", cmap="jet")
+    fig.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
+    fig.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=140, bbox_inches="tight")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Biomarcadores e ablação
+# ---------------------------------------------------------------------------
+def plot_biomarker_associations(assoc: List[Dict], top: int = 8,
+                                save_path: Optional[str] = None):
+    """Barras horizontais da AUC univariada de cada biomarcador vs grau."""
+    assoc = [a for a in assoc if not np.isnan(a.get("auc", float("nan")))][:top]
+    feats = [a["feature"] for a in assoc][::-1]
+    aucs = [a["auc"] for a in assoc][::-1]
+    fig, ax = plt.subplots(figsize=(7, 0.5 * len(feats) + 1.5))
+    bars = ax.barh(feats, aucs, color="#55A868")
+    ax.axvline(0.5, color="gray", ls="--", lw=1)
+    ax.set_xlim(0.4, 1.0); ax.set_xlabel("AUC univariada (grau)")
+    ax.set_title("Poder discriminativo dos biomarcadores")
+    for b, v in zip(bars, aucs):
+        ax.text(v + 0.005, b.get_y() + b.get_height() / 2, f"{v:.2f}", va="center", fontsize=9)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=140, bbox_inches="tight")
+    return fig
+
+
+def plot_biomarker_by_grade(rows: List[Dict], feature: str = "vol_ET",
+                            save_path: Optional[str] = None):
+    """Boxplot de um biomarcador separado por grau (LGG vs HGG)."""
+    rows = [r for r in rows if "grade" in r]
+    groups = {0: [], 1: []}
+    for r in rows:
+        groups[int(r["grade"])].append(r[feature])
+    fig, ax = plt.subplots(figsize=(5, 5))
+    data = [groups[0], groups[1]]
+    bp = ax.boxplot(data, patch_artist=True, showmeans=True)
+    ax.set_xticks([1, 2]); ax.set_xticklabels(["LGG", "HGG"])
+    for patch, c in zip(bp["boxes"], ["#4C72B0", "#C44E52"]):
+        patch.set_facecolor(c); patch.set_alpha(0.6)
+    ax.set_ylabel(feature); ax.set_title(f"{feature} por grau")
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=140, bbox_inches="tight")
+    return fig
+
+
+def plot_ablation(rows: List[Dict], save_path: Optional[str] = None):
+    """Barras agrupadas comparando variantes: Dice médio e AUC de graduação,
+    anotando os parâmetros treináveis (M) de cada uma."""
+    variants = [r["variant"] for r in rows]
+    dice = [r["dice_mean"] for r in rows]
+    auc = [r.get("grade_auc", float("nan")) for r in rows]
+    params = [r.get("params_M", float("nan")) for r in rows]
+    x = np.arange(len(variants)); w = 0.38
+    fig, ax = plt.subplots(figsize=(1.8 * len(variants) + 3, 5))
+    b1 = ax.bar(x - w / 2, dice, w, label="Dice médio", color="#4C72B0")
+    b2 = ax.bar(x + w / 2, auc, w, label="AUC graduação", color="#DD8452")
+    ax.set_xticks(x); ax.set_xticklabels(variants)
+    ax.set_ylim(0, 1.05); ax.set_ylabel("Métrica (↑ melhor)")
+    ax.set_title("Ablação — encoder de fundação vs baseline")
+    for xi, p in zip(x, params):
+        ax.text(xi, 1.0, f"{p:.2f}M", ha="center", va="bottom", fontsize=8, color="gray")
+    for bars in (b1, b2):
+        for b in bars:
+            v = b.get_height()
+            if not np.isnan(v):
+                ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.2f}",
+                        ha="center", va="bottom", fontsize=8)
+    ax.legend(loc="lower right"); ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=140, bbox_inches="tight")
