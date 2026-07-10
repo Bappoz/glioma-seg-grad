@@ -6,3 +6,5 @@ checkpoints/*.pt
 *.nii.gz
 data/
 .ipynb_checkpoints/
+.claude
+.pytest_cache
