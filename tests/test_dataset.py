@@ -132,6 +132,18 @@ def test_volume_cache_bounded():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_grade_class_weights_inverse_frequency():
+    # 80 HGG (1) / 20 LGG (0): a minoria (LGG) recebe o maior peso
+    w = D.grade_class_weights([1] * 80 + [0] * 20)
+    assert w[0] > w[1]                                       # LGG > HGG
+    # média ponderada pela frequência ~ 1 (mantém a escala da loss)
+    freq = np.array([0.2, 0.8])
+    assert abs(float((freq * w.numpy()).sum()) - 1.0) < 1e-5
+    # classe ausente não quebra (usa count=1)
+    w2 = D.grade_class_weights([1, 1, 1])
+    assert np.isfinite(w2.numpy()).all()
+
+
 def test_find_brats_root_handles_kaggle_nesting_and_skips_validation():
     # simula o unzip do Kaggle: um nível extra de pasta-wrapper + uma pasta de
     # validação irmã (sem *_seg*) que NÃO deve ser confundida com o treino.

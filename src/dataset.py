@@ -469,6 +469,24 @@ def _make_grade_sampler(grade_labels: List[int]):
                                  num_samples=len(grade_labels), replacement=True)
 
 
+def grade_class_weights(labels: List[int], n_grades: int = 2) -> "torch.Tensor":
+    """Pesos inverso-frequência (estilo sklearn 'balanced') para a CE de
+    graduação, compensando o desbalanço LGG/HGG do BraTS (tipicamente ~75-80%
+    HGG). Normalizados para média ~1, mantendo a escala da loss estável.
+
+        w_c = N / (n_grades * count_c)
+
+    Prefira isto a `balance_grade` (resampling) quando há poucos casos da classe
+    minoritária: reponderar a loss é mais estável que reamostrar (não revê o
+    mesmo punhado de LGG dezenas de vezes por época). Não use os dois ao mesmo
+    tempo — seria correção dupla."""
+    arr = np.asarray(labels)
+    counts = np.bincount(arr, minlength=n_grades).astype(np.float64)
+    counts[counts == 0] = 1.0
+    w = counts.sum() / (n_grades * counts)
+    return torch.tensor(w, dtype=torch.float32)
+
+
 def make_loaders(root: str, batch_size: int = 8, img_size: int = 256,
                  slices_per_case: int = 32, num_workers: int = 2,
                  grade_lookup: Optional[Dict[str, int]] = None,

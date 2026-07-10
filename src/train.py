@@ -70,6 +70,12 @@ class TrainConfig:
     tversky_gamma: float = 1.0
     grade_label_smoothing: float = 0.05
     seg_ce_weight: Optional[List[float]] = None
+    # peso de classe na CE de graduação (compensa o desbalanço LGG/HGG do BraTS).
+    # `auto_grade_weight=True` calcula inverso-frequência a partir do split de
+    # treino no fit(); ou passe pesos explícitos em `grade_class_weight`.
+    # Use isto OU `balance_grade` no loader — não os dois (correção dupla).
+    auto_grade_weight: bool = False
+    grade_class_weight: Optional[List[float]] = None
     # otimização
     epochs: int = 30
     lr: float = 3e-4
@@ -97,8 +103,11 @@ class Trainer:
         self.model = (model if model is not None else build_model(cfg)).to(self.device)
 
         w = torch.tensor(cfg.seg_ce_weight, device=self.device) if cfg.seg_ce_weight else None
+        gw = torch.tensor(cfg.grade_class_weight, device=self.device) \
+            if cfg.grade_class_weight else None
         self.criterion = MultiTaskLoss(
-            cfg.n_seg_classes, seg_ce_weight=w, w_seg=cfg.w_seg, w_grade=cfg.w_grade,
+            cfg.n_seg_classes, seg_ce_weight=w, grade_weight=gw,
+            w_seg=cfg.w_seg, w_grade=cfg.w_grade,
             use_focal=cfg.use_focal, region=cfg.region, tversky_alpha=cfg.tversky_alpha,
             tversky_beta=cfg.tversky_beta, tversky_gamma=cfg.tversky_gamma,
             grade_label_smoothing=cfg.grade_label_smoothing)
@@ -162,7 +171,27 @@ class Trainer:
             avg["grade_auc"] = roc.get("auc", float("nan"))
         return avg
 
+    def _maybe_auto_grade_weight(self, train_dl):
+        """Se auto_grade_weight e sem peso explícito, deriva peso de classe
+        inverso-frequência do split de treino e o injeta na CE de graduação."""
+        if not self.cfg.auto_grade_weight or self.criterion.grade.weight is not None:
+            return
+        ds = getattr(train_dl, "dataset", None)
+        labels = ds.grade_labels() if hasattr(ds, "grade_labels") else None
+        if not labels:
+            print("[auto_grade_weight] dataset sem grade_labels(); mantendo CE sem peso.")
+            return
+        from .dataset import grade_class_weights
+        gw = grade_class_weights(labels, self.cfg.n_grades).to(self.device)
+        self.criterion.grade = torch.nn.CrossEntropyLoss(
+            weight=gw, label_smoothing=self.cfg.grade_label_smoothing)
+        import numpy as np
+        counts = np.bincount(np.asarray(labels), minlength=self.cfg.n_grades).tolist()
+        print(f"[auto_grade_weight] contagem por grau (0=LGG,1=HGG): {counts} "
+              f"-> pesos: {[round(x, 2) for x in gw.tolist()]}")
+
     def fit(self, train_dl, val_dl):
+        self._maybe_auto_grade_weight(train_dl)
         for ep in range(1, self.cfg.epochs + 1):
             t0 = time.time()
             tr = self._run_epoch(train_dl, train=True)
