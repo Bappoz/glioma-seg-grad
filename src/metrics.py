@@ -167,6 +167,78 @@ def grade_roc_auc(logits: torch.Tensor, target: torch.Tensor):
         return {"auc": auc, "multiclass": True}
 
 
+# ---------------------------------------------------------------------------
+# Calibração da graduação (suporte à decisão clínica exige probabilidade honesta)
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def reliability_bins(logits: torch.Tensor, target: torch.Tensor, n_bins: int = 10):
+    """Agrupa as predições por confiança e mede a acurácia empírica em cada bin.
+    Base do reliability diagram e do ECE. Retorna dict com listas por bin."""
+    import numpy as np
+    prob = torch.softmax(logits, dim=1).cpu().numpy()
+    conf = prob.max(axis=1)
+    pred = prob.argmax(axis=1)
+    y = target.cpu().numpy()
+    edges = np.linspace(0, 1, n_bins + 1)
+    bins = {"conf": [], "acc": [], "count": [], "edges": edges.tolist()}
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (conf > lo) & (conf <= hi) if lo > 0 else (conf >= lo) & (conf <= hi)
+        if m.sum() == 0:
+            bins["conf"].append(float("nan")); bins["acc"].append(float("nan"))
+            bins["count"].append(0); continue
+        bins["conf"].append(float(conf[m].mean()))
+        bins["acc"].append(float((pred[m] == y[m]).mean()))
+        bins["count"].append(int(m.sum()))
+    return bins
+
+
+@torch.no_grad()
+def expected_calibration_error(logits: torch.Tensor, target: torch.Tensor,
+                               n_bins: int = 10) -> float:
+    """ECE = média ponderada |confiança - acurácia| por bin. 0 = perfeitamente
+    calibrado. Métrica-chave quando a probabilidade de grau vira apoio à decisão."""
+    import numpy as np
+    b = reliability_bins(logits, target, n_bins)
+    n = sum(b["count"])
+    if n == 0:
+        return float("nan")
+    ece = 0.0
+    for c, a, cnt in zip(b["conf"], b["acc"], b["count"]):
+        if cnt > 0 and not (np.isnan(c) or np.isnan(a)):
+            ece += (cnt / n) * abs(c - a)
+    return float(ece)
+
+
+@torch.no_grad()
+def brier_score(logits: torch.Tensor, target: torch.Tensor) -> float:
+    """Brier (binário) = MSE entre p(HGG) e o rótulo. Menor é melhor."""
+    import numpy as np
+    prob = torch.softmax(logits, dim=1).cpu().numpy()
+    y = target.cpu().numpy()
+    if prob.shape[1] != 2:
+        oh = np.eye(prob.shape[1])[y]
+        return float(((prob - oh) ** 2).sum(axis=1).mean())
+    return float(((prob[:, 1] - y) ** 2).mean())
+
+
+@torch.no_grad()
+def grade_report(logits: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
+    """Precision/Recall/F1 (macro) + matriz de confusão da graduação (sklearn)."""
+    pred = logits.argmax(dim=1).cpu().numpy()
+    y = target.cpu().numpy()
+    out: Dict[str, float] = {}
+    try:
+        from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+        p, r, f1, _ = precision_recall_fscore_support(
+            y, pred, average="macro", zero_division=0)
+        out.update({"precision_macro": float(p), "recall_macro": float(r),
+                    "f1_macro": float(f1)})
+        out["confusion"] = confusion_matrix(y, pred).tolist()
+    except ImportError:
+        out["error"] = "instale scikit-learn"
+    return out
+
+
 class MetricTracker:
     """Acumula médias ao longo de um epoch (para plotar depois)."""
 
@@ -176,7 +248,8 @@ class MetricTracker:
 
     def update(self, d: Dict[str, float], batch: int = 1):
         for k, v in d.items():
-            self.sums[k] = self.sums.get(k, 0.0) + v * batch
+            if isinstance(v, (int, float)):
+                self.sums[k] = self.sums.get(k, 0.0) + v * batch
         self.n += batch
 
     def average(self) -> Dict[str, float]:
