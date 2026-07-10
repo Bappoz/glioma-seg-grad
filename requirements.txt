@@ -1,11 +1,14 @@
 torch>=2.1
 torchvision
 numpy
-nibabel          # leitura de MRI .nii.gz (BraTS)
+nibabel          # leitura de MRI .nii/.nii.gz (BraTS)
 pyyaml
 matplotlib
-scikit-learn     # AUC / metricas de graduacao
-scipy            # Hausdorff95 (distance transform)
+scikit-learn     # AUC/ROC, calibração, classificador interpretável de biomarcadores
+scipy            # Hausdorff95 (distance transform) + correlação ponto-bisserial
 tqdm
-# SAM 2 (instale do repo oficial quando for usar backbone="sam2"):
-# pip install "git+https://github.com/facebookresearch/segment-anything-2.git"
+# --- opcionais (habilitados no notebook conforme a fonte de dados) ---
+# SAM 2 (instale do repo oficial para backbone="sam2"):
+#   pip install "git+https://github.com/facebookresearch/segment-anything-2.git"
+# kaggle (baixar o mirror BraTS2020 no Colab via API):
+#   pip install kaggle
