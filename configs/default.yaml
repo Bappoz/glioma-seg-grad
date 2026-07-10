@@ -34,6 +34,7 @@ tversky_beta: 0.7                 # peso dos falsos-negativos (>alpha = mais rec
 tversky_gamma: 1.0                # >1 = foco nas sub-regiões difíceis (focal-tversky)
 grade_label_smoothing: 0.05       # regulariza a graduação -> melhor calibração/ECE
 seg_ce_weight: [0.1, 1.0, 1.0, 1.0]   # deprioriza o fundo
+auto_grade_weight: true           # peso inverso-freq na CE de grau (corrige o viés HGG)
 
 # --- otimização ---
 epochs: 40
@@ -48,7 +49,7 @@ early_stop_patience: 10           # 0 desativa
 
 # --- data loading ---
 augment: true                     # flips/rot90/intensidade/gamma no treino
-balance_grade: true               # amostragem balanceada LGG/HGG por época
+balance_grade: false              # resampling do loader; use OU isto OU auto_grade_weight
 
 # --- infra ---
 out_dir: "runs/exp1"
