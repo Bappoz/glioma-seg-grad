@@ -295,7 +295,15 @@ class MaskGuidedAttnClassifier(nn.Module):
             nn.Conv2d(embed, 1, 1),
         )
         self.proj = nn.Sequential(nn.Linear(feat_ch, embed), nn.GELU(), nn.Dropout(p_drop))
-        n_geom = n_seg_classes                     # frações: tumor total + por classe (1..K-1)
+        # descritores geométricos:
+        #   1  fração de tumor total (WT)
+        #   K-1 frações por sub-região tumoral (NCR/NET, ED, ET)
+        #   3  razões clínicas (ET/TC, TC/WT, NCR/TC) — os MESMOS descritores que o
+        #      classificador logístico interpretável da Seção 9 usa. Sem elas, a
+        #      cabeça neural teria de *reaprender* a razão ET/TC a partir das
+        #      frações cruas (mais difícil) e por isso perdia para o baseline
+        #      geométrico; expô-las diretamente alinha as duas fontes de sinal.
+        n_geom = n_seg_classes + 3
         self.classifier = nn.Sequential(
             nn.Linear(embed + n_geom, embed), nn.GELU(), nn.Dropout(p_drop),
             nn.Linear(embed, n_grades),
@@ -316,11 +324,20 @@ class MaskGuidedAttnClassifier(nn.Module):
         pooled = (feat * a).sum(dim=(2, 3))                       # [B, C]
         emb = self.proj(pooled)
 
-        # descritores geométricos (interpretáveis, robustos): fração de área
-        # do tumor total e de cada sub-região tumoral na fatia.
-        frac_total = tumor_prob.mean(dim=(2, 3))                  # [B,1]
-        frac_cls = seg_prob[:, 1:].mean(dim=(2, 3))               # [B,K-1]
-        geom = torch.cat([frac_total, frac_cls], dim=1)          # [B,K]
+        # descritores geométricos (interpretáveis, robustos): fração de área do
+        # tumor total e de cada sub-região tumoral na fatia + razões clínicas.
+        frac_total = tumor_prob.mean(dim=(2, 3))                  # [B,1] ~ WT
+        frac_cls = seg_prob[:, 1:].mean(dim=(2, 3))               # [B,K-1] (NCR,ED,ET)
+        eps = 1e-6
+        frac_ncr = frac_cls[:, 0:1]
+        frac_et = frac_cls[:, -1:]                                # última classe = ET
+        frac_tc = frac_ncr + frac_et                             # TC = {NCR, ET}
+        ratios = torch.cat([
+            frac_et / (frac_tc + eps),                           # ET/TC
+            frac_tc / (frac_total + eps),                        # TC/WT
+            frac_ncr / (frac_tc + eps),                          # NCR/TC (fração de necrose)
+        ], dim=1)                                                # [B,3]
+        geom = torch.cat([frac_total, frac_cls, ratios], dim=1)  # [B,K+3]
         logits = self.classifier(torch.cat([emb, geom], dim=1))
         if return_attn:
             return logits, a, geom
