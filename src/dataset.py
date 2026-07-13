@@ -487,6 +487,74 @@ def grade_class_weights(labels: List[int], n_grades: int = 2) -> "torch.Tensor":
     return torch.tensor(w, dtype=torch.float32)
 
 
+def _patient_grades(ds) -> Dict[str, int]:
+    """Mapa case_id -> grau para um dataset (nível de PACIENTE). Usa `entries`
+    (NpySliceDataset) quando disponível; senão cai para pares case_id/grade do
+    índice on-the-fly. Retorna {} se o dataset não expõe essa informação."""
+    entries = getattr(ds, "entries", None)
+    if entries is not None:                       # NpySliceDataset
+        return {e["case_id"]: int(e["grade"]) for e in entries}
+    grade_map = getattr(ds, "_grade", None)
+    if isinstance(grade_map, dict):               # BraTSSliceDataset
+        return {c: int(g) for c, g in grade_map.items()}
+    return {}
+
+
+def grade_split_report(train_ds, val_ds, n_grades: int = 2, verbose: bool = True) -> Dict:
+    """Sanity-check PERMANENTE do split: distribuição de grau em treino e validação,
+    a nível de PACIENTE e de FATIA. Detecta split não-estratificado (ex.: 100% de
+    uma classe num dos lados). Retorna um dict com as contagens/frações e, com
+    `verbose`, imprime uma tabela no formato dos demais prints do notebook."""
+    names = GRADE_NAMES
+
+    def _counts(labels: List[int]) -> np.ndarray:
+        return np.bincount(np.asarray(labels, dtype=int), minlength=n_grades)
+
+    tr_slice = _counts(train_ds.grade_labels())
+    va_slice = _counts(val_ds.grade_labels())
+    tr_pat = _counts(list(_patient_grades(train_ds).values()))
+    va_pat = _counts(list(_patient_grades(val_ds).values()))
+    has_patient = int((tr_pat + va_pat).sum()) > 0     # datasets on-the-fly/npz têm; sintético não
+    total_pat = tr_pat + va_pat
+
+    def _frac(c: np.ndarray) -> List[float]:
+        s = int(c.sum())
+        return [float(x) / s if s else float("nan") for x in c]
+
+    report = {
+        "patient": {"train": tr_pat.tolist(), "val": va_pat.tolist()},
+        "slice": {"train": tr_slice.tolist(), "val": va_slice.tolist()},
+        "val_frac_by_grade": _frac(va_pat if has_patient else va_slice),
+        "dataset_frac_by_grade": _frac(total_pat if has_patient else tr_slice + va_slice),
+    }
+    if verbose:
+        print("Verificação do split (estratificação por grau):")
+        if has_patient:
+            print(f"{'':10s} {'PACIENTES':>22s}   {'FATIAS':>22s}")
+            print(f"{'grau':10s} {'treino':>7s} {'val':>7s} {'%val':>6s}   "
+                  f"{'treino':>7s} {'val':>7s} {'%val':>6s}")
+            for g in range(n_grades):
+                pv, sv = tr_pat[g] + va_pat[g], tr_slice[g] + va_slice[g]
+                p_pct = 100 * va_pat[g] / pv if pv else float("nan")
+                s_pct = 100 * va_slice[g] / sv if sv else float("nan")
+                print(f"{names.get(g, g):10s} {tr_pat[g]:7d} {va_pat[g]:7d} {p_pct:5.1f}%   "
+                      f"{tr_slice[g]:7d} {va_slice[g]:7d} {s_pct:5.1f}%")
+            lgg_all = _frac(total_pat)[0] if n_grades >= 2 else float("nan")
+            print(f"→ LGG = {100*lgg_all:.1f}% do dataset; ambos os graus devem aparecer "
+                  f"em treino E validação (senão o split não está estratificado).")
+            miss = min(va_pat.tolist()) == 0 or min(tr_pat.tolist()) == 0
+        else:  # sem info a nível de paciente (ex.: SyntheticBraTS) -> só fatias
+            print(f"{'grau':10s} {'treino':>7s} {'val':>7s} {'%val':>6s}   (nível de fatia)")
+            for g in range(n_grades):
+                sv = tr_slice[g] + va_slice[g]
+                s_pct = 100 * va_slice[g] / sv if sv else float("nan")
+                print(f"{names.get(g, g):10s} {tr_slice[g]:7d} {va_slice[g]:7d} {s_pct:5.1f}%")
+            miss = min(va_slice.tolist()) == 0 or min(tr_slice.tolist()) == 0
+        if miss:
+            print("  ⚠ um dos lados ficou SEM uma das classes — split NÃO estratificado.")
+    return report
+
+
 def make_loaders(root: str, batch_size: int = 8, img_size: int = 256,
                  slices_per_case: int = 32, num_workers: int = 2,
                  grade_lookup: Optional[Dict[str, int]] = None,
