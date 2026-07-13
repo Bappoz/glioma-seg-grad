@@ -62,10 +62,14 @@ def seg_scores(pred: torch.Tensor, target: torch.Tensor,
 
 @torch.no_grad()
 def grade_scores(logits: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
-    """logits [B,K] ; target [B]. Accuracy + Sens/Espec (binário LGG/HGG)."""
+    """logits [B,K] ; target [B]. Accuracy + Sens/Espec (binário LGG/HGG).
+
+    Inclui `grade_bal_acc` (balanced accuracy = recall médio por classe). No BraTS
+    (~80% HGG) a accuracy bruta é enganosa — um modelo que só prevê HGG já acerta
+    ~80%; a balanced accuracy cai para ~0.5 nesse caso, revelando o colapso."""
     pred = logits.argmax(dim=1)
     acc = (pred == target).float().mean().item()
-    out = {"grade_acc": acc}
+    out = {"grade_acc": acc, "grade_bal_acc": balanced_accuracy(pred, target)}
     if logits.shape[1] == 2:
         tp = ((pred == 1) & (target == 1)).sum().float()
         fp = ((pred == 1) & (target == 0)).sum().float()
@@ -74,6 +78,20 @@ def grade_scores(logits: torch.Tensor, target: torch.Tensor) -> Dict[str, float]
         out["grade_sens"] = (tp / (tp + fn + 1e-6)).item()
         out["grade_spec"] = (tn / (tn + fp + 1e-6)).item()
     return out
+
+
+@torch.no_grad()
+def balanced_accuracy(pred: torch.Tensor, target: torch.Tensor) -> float:
+    """Média dos recalls por classe (robusta a desbalanço). Classes ausentes no
+    alvo são ignoradas. 0.5 ~ chance para binário; 1.0 = perfeito."""
+    recalls = []
+    for c in target.unique():
+        mask = target == c
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        recalls.append((pred[mask] == c).float().mean().item())
+    return float(sum(recalls) / len(recalls)) if recalls else float("nan")
 
 
 # ---------------------------------------------------------------------------
