@@ -50,10 +50,11 @@ def test_lora_merge_equivalence():
 
 
 def test_grade_head_uses_geometry():
-    # a cabeça concatena descritores geométricos: entrada do classifier = embed + K
+    # a cabeça concatena descritores geométricos: frações (tumor total + K-1
+    # sub-regiões) + 3 razões clínicas (ET/TC, TC/WT, NCR/TC) = K+3.
     net = SAM2SegGradeNet(backbone="stub", n_seg_classes=4)
     first_linear = net.grader.classifier[0]
-    assert first_linear.in_features == 128 + 4             # embed(128) + geom(4)
+    assert first_linear.in_features == 128 + (4 + 3)       # embed(128) + geom(K+3)
 
 
 if __name__ == "__main__":
