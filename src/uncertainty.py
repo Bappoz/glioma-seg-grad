@@ -43,8 +43,8 @@ def predictive_entropy(prob: torch.Tensor, dim: int = 1, eps: float = 1e-8) -> t
 
 
 @torch.no_grad()
-def mc_dropout_predict(model: nn.Module, x: torch.Tensor, n_samples: int = 10
-                       ) -> Dict[str, torch.Tensor]:
+def mc_dropout_predict(model: nn.Module, x: torch.Tensor, n_samples: int = 10,
+                       verbose: bool = False) -> Dict[str, torch.Tensor]:
     """N passagens com dropout ativo. Retorna médias + mapas de incerteza.
 
     Chaves:
@@ -52,12 +52,18 @@ def mc_dropout_predict(model: nn.Module, x: torch.Tensor, n_samples: int = 10
         seg_pred   [B,H,W]   argmax da média
         seg_total_entropy [B,H,W]  incerteza total (H[E[p]])
         seg_mutual_info   [B,H,W]  incerteza EPISTÊMICA (mapa de dúvida do modelo)
+        seg_sample_std    [B,H,W]  desvio-padrão de p(tumor) ENTRE as N passagens
+                                   (diagnóstico: se ~0, o dropout não variou)
         grade_prob [B,G]     probabilidade média de grau
         grade_std  [B]       desvio-padrão de p(classe positiva) entre passagens
-    """
+        n_dropout_active   int  quantas camadas de Dropout ficaram ativas
+
+    `verbose=True` imprime um diagnóstico (camadas ativas + variabilidade entre
+    passagens) — serve para confirmar que a incerteza baixa é genuína (modelo
+    confiante) e não um bug de dropout inerte."""
     was_training = model.training
     model.eval()
-    enable_mc_dropout(model)
+    n_active = enable_mc_dropout(model)
     seg_probs, grade_probs = [], []
     entropies = []
     for _ in range(n_samples):
@@ -68,17 +74,32 @@ def mc_dropout_predict(model: nn.Module, x: torch.Tensor, n_samples: int = 10
         grade_probs.append(torch.softmax(out["grade_logits"], dim=1))
     model.train(was_training)
 
-    seg_mean = torch.stack(seg_probs).mean(0)                 # [B,K,H,W]
+    seg_stack = torch.stack(seg_probs)                        # [N,B,K,H,W]
+    seg_mean = seg_stack.mean(0)                              # [B,K,H,W]
     total_entropy = predictive_entropy(seg_mean)              # H[E[p]]
     expected_entropy = torch.stack(entropies).mean(0)         # E[H[p]]
     mutual_info = (total_entropy - expected_entropy).clamp_min(0)
+    # variabilidade bruta entre passagens (p/ diagnóstico): desvio-padrão de
+    # p(tumor)=1-p(fundo) ao longo das N amostras. Se for ~0, o dropout não está
+    # perturbando o forward (bug) — se >0 mas a MI ainda é baixa, é confiança real.
+    seg_sample_std = seg_stack[:, :, 0].std(0)                # [B,H,W]
     grade_stack = torch.stack(grade_probs)                    # [N,B,G]
     grade_mean = grade_stack.mean(0)
     pos = grade_stack[..., -1] if grade_stack.shape[-1] == 2 else grade_stack.max(-1).values
     grade_std = pos.std(0)
+    if verbose:
+        print(f"[MC-Dropout] camadas de Dropout ativas: {n_active} | "
+              f"passagens: {n_samples} | "
+              f"std entre passagens (seg): {float(seg_sample_std.mean()):.5f} | "
+              f"std entre passagens (grau): {float(grade_std.mean()):.5f}")
+        if n_active == 0:
+            print("  ⚠ nenhuma camada de Dropout ativa — MC-Dropout degenera "
+                  "para predição determinística (aumente p_drop no TrainConfig).")
     return {"seg_prob": seg_mean, "seg_pred": seg_mean.argmax(1),
             "seg_total_entropy": total_entropy, "seg_mutual_info": mutual_info,
-            "grade_prob": grade_mean, "grade_std": grade_std}
+            "seg_sample_std": seg_sample_std,
+            "grade_prob": grade_mean, "grade_std": grade_std,
+            "n_dropout_active": n_active}
 
 
 _TTA_OPS = ("id", "flip_h", "flip_v", "flip_hv")
@@ -121,6 +142,8 @@ def uncertainty_summary(unc: Dict[str, torch.Tensor]) -> Dict[str, float]:
         out["mean_epistemic"] = float(unc["seg_mutual_info"].mean())
     if "seg_total_entropy" in unc:
         out["mean_total_entropy"] = float(unc["seg_total_entropy"].mean())
+    if "seg_sample_std" in unc:
+        out["mean_sample_std"] = float(unc["seg_sample_std"].mean())
     if "grade_std" in unc:
         out["mean_grade_std"] = float(unc["grade_std"].mean())
     return out
