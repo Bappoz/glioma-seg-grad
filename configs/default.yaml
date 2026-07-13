@@ -26,7 +26,7 @@ lora_dropout: 0.05
 
 # --- perdas ---
 w_seg: 1.0
-w_grade: 0.5
+w_grade: 1.0                       # graduação no mesmo peso da seg (0.5 sub-priorizava o grau)
 use_focal: false
 region: "tversky"                 # "dice" | "tversky" (tversky prioriza recall em ET)
 tversky_alpha: 0.3                # peso dos falsos-positivos
